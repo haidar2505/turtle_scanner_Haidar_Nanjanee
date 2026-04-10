@@ -2,6 +2,7 @@ import rclpy
 from rclpy.node import Node
 from turtlesim.msg import Pose
 from geometry_msgs.msg import Twist
+from std_msgs.msg import Bool
 import math
 
 class TurtleScannerNode(Node):
@@ -31,6 +32,12 @@ class TurtleScannerNode(Node):
             10
         )
 
+        self.target_pub = self.create_publisher(
+            Bool,
+            '/target_detected',
+            10
+        )
+
         self.nb_lignes = 5
         self.y_start = 1.0
         self.y_step = 2.0
@@ -41,6 +48,9 @@ class TurtleScannerNode(Node):
         self.Kp_lin = 1.0
         self.linear_speed_max = 2.0
         self.waypoint_tolerance = 0.3
+
+        self.detection_radius = 1.5
+        self.target_detected = False
 
         self.waypoints = self.generate_serpentine_waypoints()
         self.current_index = 0
@@ -84,46 +94,55 @@ class TurtleScannerNode(Node):
 
     def scan_step(self):
 
-        # wait until pose is received
-        if self.pose_scanner is None:
+        if self.pose_scanner is None or self.pose_target is None:
             return
 
-        # end condition
+        dist_target = self.distance_to_target()
+
+        msg = Bool()
+
+        if dist_target < self.detection_radius:
+            self.target_detected = True
+
+            msg.data = True
+            self.target_pub.publish(msg)
+
+            self.stop_turtle()
+
+            self.get_logger().info(
+                f"Cible détectée à ({self.pose_target.x:.2f}, {self.pose_target.y:.2f}) !"
+            )
+            return
+        else:
+            msg.data = False
+            self.target_pub.publish(msg)
+
+        if self.target_detected:
+            self.stop_turtle()
+            return
+
         if self.current_index >= len(self.waypoints):
             self.stop_turtle()
             self.get_logger().info("Balayage terminé")
             return
 
         current_pos = (self.pose_scanner.x, self.pose_scanner.y)
-
         target = self.waypoints[self.current_index]
 
-        # distance
         distance = self.compute_distance(current_pos, target)
 
-        # waypoint reached
         if distance < self.waypoint_tolerance:
             self.current_index += 1
             return
 
-        # desired angle
         theta_desired = self.compute_angle(current_pos, target)
         theta = self.pose_scanner.theta
 
-        # angular error (normalized)
         error = math.atan(math.tan((theta_desired - theta) / 2))
 
-        # proportional control
-        angular_z = self.Kp_ang * error
-        linear_x = self.Kp_lin * distance
-
-        # speed limit
-        linear_x = min(linear_x, self.linear_speed_max)
-
-        # publish command
         cmd = Twist()
-        cmd.linear.x = linear_x
-        cmd.angular.z = angular_z
+        cmd.linear.x = min(self.Kp_lin * distance, self.linear_speed_max)
+        cmd.angular.z = self.Kp_ang * error
 
         self.publisher.publish(cmd)
 
@@ -132,6 +151,12 @@ class TurtleScannerNode(Node):
         cmd.linear.x = 0.0
         cmd.angular.z = 0.0
         self.publisher.publish(cmd)
+
+    def distance_to_target(self):
+        scanner = (self.pose_scanner.x, self.pose_scanner.y)
+        target = (self.pose_target.x, self.pose_target.y)
+
+        return self.compute_distance(scanner, target)
 
 def main(args=None):
     rclpy.init(args=args)
